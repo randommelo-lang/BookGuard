@@ -5,6 +5,7 @@ function App() {
   const [book, setBook] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [analysis, setAnalysis] = useState(null);
 
   const analyzeBook = async () => {
     if (!url.trim()) {
@@ -15,6 +16,7 @@ function App() {
     setLoading(true);
     setError("");
     setBook(null);
+    setAnalysis(null);
 
     try {
       const response = await fetch("http://127.0.0.1:8000/api/analyze", {
@@ -36,6 +38,7 @@ function App() {
       }
 
       setBook(data.data);
+      setAnalysis(data.analysis);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -103,6 +106,31 @@ function App() {
           </p>
         </section>
       )}
+      {analysis && (
+        <section>
+          <h2>BookGuard Assessment</h2>
+
+          <p>
+            <strong>Risk Level:</strong>{" "}
+            {analysis.risk_level.toUpperCase()}
+          </p>
+
+          <p>
+            <strong>Risk Score:</strong>{" "}
+            {analysis.risk_score} / 100
+          </p>
+
+          <h3>Signals</h3>
+
+          {analysis.signals.map((signal, index) => (
+            <p key={index}>
+              <strong>{signal.status}:</strong>{" "}
+              {signal.message}
+            </p>
+          ))}
+        </section>
+      )}
+      
     </main>
   );
 }

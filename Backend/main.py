@@ -4,6 +4,7 @@ from pydantic import BaseModel
 
 from brightdata import scrape_book
 from validator import validate_book
+from analyzer import analyze_book
 
 
 app = FastAPI(title="BookGuard API")
@@ -44,7 +45,10 @@ def analyze(request: AnalyzeRequest):
             },
         )
 
+    analysis = analyze_book(data)
+
     return {
         "status": "success",
         "data": data,
+        "analysis": analysis,
     }
