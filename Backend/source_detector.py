@@ -16,6 +16,9 @@ def detect_source(url: str) -> str:
     if not url:
         return "unknown"
 
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
     try:
         hostname = urlparse(url).netloc.lower()
 

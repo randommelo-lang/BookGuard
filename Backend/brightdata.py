@@ -1,5 +1,7 @@
 import os
 import time
+import json
+from urllib.parse import quote_plus
 
 import httpx
 from dotenv import load_dotenv
@@ -7,32 +9,84 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BRIGHTDATA_API_KEY = os.getenv("BRIGHTDATA_API_KEY")
-BRIGHT_DATA_COLLECTOR_ID = os.getenv("BRIGHT_DATA_COLLECTOR_ID")
+
+# ============================================================
+# Environment
+# ============================================================
+
+BRIGHTDATA_API_KEY = os.getenv(
+    "BRIGHTDATA_API_KEY"
+)
+
+BRIGHT_DATA_COLLECTOR_ID = os.getenv(
+    "BRIGHT_DATA_COLLECTOR_ID"
+)
+
 BRIGHT_DATA_SEARCH_COLLECTOR_ID = os.getenv(
     "BRIGHT_DATA_SEARCH_COLLECTOR_ID"
 )
+
 BRIGHT_DATA_AMAZON_COLLECTOR_ID = os.getenv(
     "BRIGHT_DATA_AMAZON_COLLECTOR_ID"
 )
+
 BRIGHT_DATA_AMAZON_PRODUCT_COLLECTOR_ID = os.getenv(
     "BRIGHT_DATA_AMAZON_PRODUCT_COLLECTOR_ID"
 )
+
 BRIGHT_DATA_FLIPKART_DATASET_ID = os.getenv(
     "BRIGHT_DATA_FLIPKART_DATASET_ID"
 )
 
+BRIGHT_DATA_FLIPKART_PRODUCT_COLLECTOR_ID = os.getenv(
+    "BRIGHT_DATA_FLIPKART_PRODUCT_COLLECTOR_ID",
+    BRIGHT_DATA_FLIPKART_DATASET_ID,
+)
+
+
+# ============================================================
+# Common helpers
+# ============================================================
+
+def _require_api_key():
+    if not BRIGHTDATA_API_KEY:
+        raise RuntimeError(
+            "BRIGHTDATA_API_KEY is not configured"
+        )
+
+
+def _headers(json_content: bool = False):
+    headers = {
+        "Authorization": (
+            f"Bearer {BRIGHTDATA_API_KEY}"
+        ),
+    }
+
+    if json_content:
+        headers["Content-Type"] = (
+            "application/json"
+        )
+
+    return headers
+
+
+# ============================================================
+# Generic Bright Data collector
+# ============================================================
 
 def trigger_collector(book_url: str):
+    _require_api_key()
+
+    if not BRIGHT_DATA_COLLECTOR_ID:
+        raise RuntimeError(
+            "BRIGHT_DATA_COLLECTOR_ID is not configured"
+        )
+
     endpoint = (
         "https://api.brightdata.com/dca/trigger"
-        f"?collector={BRIGHT_DATA_COLLECTOR_ID}&queue_next=1"
+        f"?collector={BRIGHT_DATA_COLLECTOR_ID}"
+        "&queue_next=1"
     )
-
-    headers = {
-        "Authorization": f"Bearer {BRIGHTDATA_API_KEY}",
-        "Content-Type": "application/json",
-    }
 
     payload = [
         {
@@ -42,7 +96,7 @@ def trigger_collector(book_url: str):
 
     response = httpx.post(
         endpoint,
-        headers=headers,
+        headers=_headers(json_content=True),
         json=payload,
         timeout=60,
     )
@@ -53,11 +107,16 @@ def trigger_collector(book_url: str):
 
 
 def get_collection(collection_id: str):
-    url = "https://api.brightdata.com/dca/dataset"
+    _require_api_key()
 
-    headers = {
-        "Authorization": f"Bearer {BRIGHTDATA_API_KEY}",
-    }
+    if not collection_id:
+        raise ValueError(
+            "collection_id is required"
+        )
+
+    url = (
+        "https://api.brightdata.com/dca/dataset"
+    )
 
     params = {
         "id": collection_id,
@@ -65,7 +124,7 @@ def get_collection(collection_id: str):
 
     response = httpx.get(
         url,
-        headers=headers,
+        headers=_headers(),
         params=params,
         timeout=60,
     )
@@ -83,8 +142,7 @@ def get_collection(collection_id: str):
     except ValueError:
         pass
 
-    # Bright Data can return multiple JSON objects,
-    # one per line, when a collection contains multiple results.
+    # JSON Lines response
     records = []
 
     for line in text.splitlines():
@@ -94,10 +152,9 @@ def get_collection(collection_id: str):
             continue
 
         try:
-            records.append(httpx.Response(
-                200,
-                content=line,
-            ).json())
+            records.append(
+                json.loads(line)
+            )
         except ValueError:
             continue
 
@@ -109,65 +166,99 @@ def get_collection(collection_id: str):
     )
 
 
-def wait_for_collection(collection_id: str):
-    while True:
-        result = get_collection(collection_id)
+def wait_for_collection(
+    collection_id: str,
+    interval: int = 10,
+    timeout: int = 300,
+):
+    """
+    Wait for a DCA collection to finish.
 
-        # Completed collection containing multiple records
+    Unlike the old implementation, this has a timeout
+    so a broken collector cannot hang BookGuard forever.
+    """
+
+    started_at = time.time()
+
+    while True:
+
+        if time.time() - started_at > timeout:
+            raise TimeoutError(
+                "Bright Data collection timed out"
+            )
+
+        result = get_collection(
+            collection_id
+        )
+
+        # Completed collection containing
+        # multiple records.
         if isinstance(result, list):
-            print(f"Collection returned {len(result)} records")
+            print(
+                f"Collection returned "
+                f"{len(result)} records"
+            )
             return result
 
         status = result.get("status")
 
         if status:
-            print(f"Collection status: {status}")
+            print(
+                f"Collection status: {status}"
+            )
 
-        if status in {"collecting", "building"}:
-            time.sleep(30)
+        if status in {
+            "collecting",
+            "building",
+            "pending",
+            "running",
+        }:
+            time.sleep(interval)
             continue
 
         return result
 
 
 def scrape_book(book_url: str):
-    if not BRIGHTDATA_API_KEY:
+    result = trigger_collector(
+        book_url
+    )
+
+    collection_id = result.get(
+        "collection_id"
+    )
+
+    if not collection_id:
         raise RuntimeError(
-            "BRIGHTDATA_API_KEY is not configured"
+            "Bright Data collector did not "
+            "return a collection_id"
         )
 
-    if not BRIGHT_DATA_COLLECTOR_ID:
-        raise RuntimeError(
-            "BRIGHT_DATA_COLLECTOR_ID is not configured"
-        )
-
-    result = trigger_collector(book_url)
-
-    collection_id = result["collection_id"]
-
-    return wait_for_collection(collection_id)
+    return wait_for_collection(
+        collection_id
+    )
 
 
-def trigger_search_collector(search_url: str):
-    if not BRIGHTDATA_API_KEY:
-        raise RuntimeError(
-            "BRIGHTDATA_API_KEY is not configured"
-        )
+# ============================================================
+# Search collector
+# ============================================================
+
+def trigger_search_collector(
+    search_url: str
+):
+    _require_api_key()
 
     if not BRIGHT_DATA_SEARCH_COLLECTOR_ID:
         raise RuntimeError(
-            "BRIGHT_DATA_SEARCH_COLLECTOR_ID is not configured"
+            "BRIGHT_DATA_SEARCH_COLLECTOR_ID "
+            "is not configured"
         )
 
     endpoint = (
         "https://api.brightdata.com/dca/trigger"
-        f"?collector={BRIGHT_DATA_SEARCH_COLLECTOR_ID}&queue_next=1"
+        f"?collector={BRIGHT_DATA_SEARCH_COLLECTOR_ID}"
+        "&queue_next=1"
     )
-
-    headers = {
-        "Authorization": f"Bearer {BRIGHTDATA_API_KEY}",
-        "Content-Type": "application/json",
-    }
 
     payload = [
         {
@@ -177,14 +268,16 @@ def trigger_search_collector(search_url: str):
 
     response = httpx.post(
         endpoint,
-        headers=headers,
+        headers=_headers(json_content=True),
         json=payload,
         timeout=60,
     )
 
     response.raise_for_status()
 
-    print("Bright Data response:")
+    print(
+        "Bright Data search response:"
+    )
     print(response.text)
 
     return response.json()
@@ -202,30 +295,49 @@ def search_bookswagon(
     isbn = isbn_13 or isbn_10
 
     search_url = (
-        f"https://www.bookswagon.com/search-books/{isbn}"
+        "https://www.bookswagon.com/search-books/"
+        f"{isbn}"
     )
 
-    result = trigger_search_collector(search_url)
+    result = trigger_search_collector(
+        search_url
+    )
 
-    collection_id = result["collection_id"]
+    collection_id = result.get(
+        "collection_id"
+    )
 
-    return wait_for_collection(collection_id)
+    if not collection_id:
+        raise RuntimeError(
+            "Bookswagon search collector did not "
+            "return a collection_id"
+        )
 
-def trigger_amazon_collector(url: str):
+    return wait_for_collection(
+        collection_id
+    )
+
+
+# ============================================================
+# Amazon collector
+# ============================================================
+
+def trigger_amazon_collector(
+    url: str
+):
+    _require_api_key()
+
     if not BRIGHT_DATA_AMAZON_COLLECTOR_ID:
         raise RuntimeError(
-            "BRIGHT_DATA_AMAZON_COLLECTOR_ID is not configured"
+            "BRIGHT_DATA_AMAZON_COLLECTOR_ID "
+            "is not configured"
         )
 
     endpoint = (
         "https://api.brightdata.com/dca/trigger"
-        f"?collector={BRIGHT_DATA_AMAZON_COLLECTOR_ID}&queue_next=1"
+        f"?collector={BRIGHT_DATA_AMAZON_COLLECTOR_ID}"
+        "&queue_next=1"
     )
-
-    headers = {
-        "Authorization": f"Bearer {BRIGHTDATA_API_KEY}",
-        "Content-Type": "application/json",
-    }
 
     payload = [
         {
@@ -235,7 +347,7 @@ def trigger_amazon_collector(url: str):
 
     response = httpx.post(
         endpoint,
-        headers=headers,
+        headers=_headers(json_content=True),
         json=payload,
         timeout=60,
     )
@@ -244,32 +356,40 @@ def trigger_amazon_collector(url: str):
 
     return response.json()
 
+
 def scrape_amazon(url: str):
-    if not BRIGHTDATA_API_KEY:
+    result = trigger_amazon_collector(
+        url
+    )
+
+    collection_id = result.get(
+        "collection_id"
+    )
+
+    if not collection_id:
         raise RuntimeError(
-            "BRIGHTDATA_API_KEY is not configured"
+            "Amazon collector did not "
+            "return a collection_id"
         )
 
-    if not BRIGHT_DATA_AMAZON_COLLECTOR_ID:
-        raise RuntimeError(
-            "BRIGHT_DATA_AMAZON_COLLECTOR_ID is not configured"
-        )
+    return wait_for_collection(
+        collection_id
+    )
 
-    result = trigger_amazon_collector(url)
 
-    collection_id = result["collection_id"]
+# ============================================================
+# Amazon product collector
+# ============================================================
 
-    return wait_for_collection(collection_id)
-
-def trigger_amazon_product_collector(product_url: str):
-    if not BRIGHTDATA_API_KEY:
-        raise RuntimeError(
-            "BRIGHTDATA_API_KEY is not configured"
-        )
+def trigger_amazon_product_collector(
+    product_url: str
+):
+    _require_api_key()
 
     if not BRIGHT_DATA_AMAZON_PRODUCT_COLLECTOR_ID:
         raise RuntimeError(
-            "BRIGHT_DATA_AMAZON_PRODUCT_COLLECTOR_ID is not configured"
+            "BRIGHT_DATA_AMAZON_PRODUCT_COLLECTOR_ID "
+            "is not configured"
         )
 
     endpoint = (
@@ -277,11 +397,6 @@ def trigger_amazon_product_collector(product_url: str):
         f"?collector={BRIGHT_DATA_AMAZON_PRODUCT_COLLECTOR_ID}"
         "&queue_next=1"
     )
-
-    headers = {
-        "Authorization": f"Bearer {BRIGHTDATA_API_KEY}",
-        "Content-Type": "application/json",
-    }
 
     payload = [
         {
@@ -291,7 +406,7 @@ def trigger_amazon_product_collector(product_url: str):
 
     response = httpx.post(
         endpoint,
-        headers=headers,
+        headers=_headers(json_content=True),
         json=payload,
         timeout=60,
     )
@@ -301,32 +416,52 @@ def trigger_amazon_product_collector(product_url: str):
     return response.json()
 
 
-def scrape_amazon_product(product_url: str):
-    result = trigger_amazon_product_collector(product_url)
+def scrape_amazon_product(
+    product_url: str
+):
+    result = (
+        trigger_amazon_product_collector(
+            product_url
+        )
+    )
 
-    collection_id = result["collection_id"]
+    collection_id = result.get(
+        "collection_id"
+    )
 
-    return wait_for_collection(collection_id)
-
-def trigger_flipkart_dataset(book_url: str):
-    if not BRIGHTDATA_API_KEY:
-        raise RuntimeError("BRIGHTDATA_API_KEY is not configured")
-
-    if not BRIGHT_DATA_FLIPKART_DATASET_ID:
+    if not collection_id:
         raise RuntimeError(
+            "Amazon product collector did not "
+            "return a collection_id"
+        )
+
+    return wait_for_collection(
+        collection_id
+    )
+
+
+# ============================================================
+# Flipkart product dataset
+# ============================================================
+
+def trigger_flipkart_dataset(
+    book_url: str
+):
+    _require_api_key()
+
+    flipkart_id = BRIGHT_DATA_FLIPKART_PRODUCT_COLLECTOR_ID or BRIGHT_DATA_FLIPKART_DATASET_ID
+
+    if not flipkart_id:
+        raise RuntimeError(
+            "BRIGHT_DATA_FLIPKART_PRODUCT_COLLECTOR_ID or "
             "BRIGHT_DATA_FLIPKART_DATASET_ID is not configured"
         )
 
     endpoint = (
         "https://api.brightdata.com/datasets/v3/trigger"
-        f"?dataset_id={BRIGHT_DATA_FLIPKART_DATASET_ID}"
+        f"?dataset_id={flipkart_id}"
         "&include_errors=true"
     )
-
-    headers = {
-        "Authorization": f"Bearer {BRIGHTDATA_API_KEY}",
-        "Content-Type": "application/json",
-    }
 
     payload = [
         {
@@ -336,7 +471,7 @@ def trigger_flipkart_dataset(book_url: str):
 
     response = httpx.post(
         endpoint,
-        headers=headers,
+        headers=_headers(json_content=True),
         json=payload,
         timeout=60,
     )
@@ -345,41 +480,315 @@ def trigger_flipkart_dataset(book_url: str):
 
     return response.json()
 
-def get_flipkart_snapshot(snapshot_id: str):
-    if not BRIGHTDATA_API_KEY:
-        raise RuntimeError(
-            "BRIGHTDATA_API_KEY is not configured"
+
+def get_flipkart_snapshot(
+    snapshot_id: str
+):
+    """
+    Retrieve the exact snapshot returned by
+    the Flipkart dataset trigger.
+    """
+
+    _require_api_key()
+
+    if not snapshot_id:
+        raise ValueError(
+            "snapshot_id is required"
         )
 
     url = (
-        "https://api.brightdata.com/datasets/v3/snapshot/"
-        f"{'sd_mt33x2e0dhl6auuxl'}"
+        "https://api.brightdata.com/"
+        "datasets/v3/snapshot/"
+        f"{snapshot_id}"
     )
-
-    headers = {
-        "Authorization": f"Bearer {BRIGHTDATA_API_KEY}",
-    }
 
     response = httpx.get(
         url,
-        headers=headers,
+        headers=_headers(),
         timeout=60,
     )
 
-    response.raise_for_status()
-
     return response
 
-def scrape_flipkart(book_url: str):
-    result = trigger_flipkart_dataset(book_url)
 
-    snapshot_id = result["snapshot_id"]
+def wait_for_flipkart_snapshot(
+    snapshot_id: str,
+    interval: int = 5,
+    timeout: int = 120,
+):
+    """
+    Poll Flipkart dataset snapshot status until ready.
+    """
+    started_at = time.time()
+    while True:
+        if time.time() - started_at > timeout:
+            raise TimeoutError("Flipkart snapshot timed out")
 
-    response = get_flipkart_snapshot(snapshot_id)
+        response = get_flipkart_snapshot(snapshot_id)
+        if response.status_code == 200:
+            try:
+                data = response.json()
+                if data:
+                    if isinstance(data, list):
+                        return data[0] if data else {}
+                    return data
+            except ValueError:
+                pass
 
-    if response.status_code != 200:
+        time.sleep(interval)
+
+
+def scrape_flipkart(
+    book_url: str
+):
+    result = trigger_flipkart_dataset(
+        book_url
+    )
+
+    snapshot_id = result.get(
+        "snapshot_id"
+    )
+
+    if not snapshot_id:
         raise RuntimeError(
-            f"Flipkart snapshot request failed: {response.status_code}"
+            "Flipkart dataset did not "
+            "return a snapshot_id"
         )
 
-    return response.json()
+    return wait_for_flipkart_snapshot(
+        snapshot_id
+    )
+
+
+# ============================================================
+# Flipkart discovery
+# ============================================================
+
+def _extract_product_urls(
+    data
+) -> list[str]:
+    """
+    Extract product URLs from common Bright Data
+    search-result response shapes.
+    """
+
+    urls = []
+
+    if isinstance(data, dict):
+
+        # Direct product URL
+        direct_url = data.get(
+            "product_url"
+        )
+
+        if direct_url:
+            urls.append(direct_url)
+
+        # Common URL fields
+        for field in [
+            "url",
+            "link",
+            "product_link",
+            "href",
+        ]:
+            value = data.get(field)
+
+            if (
+                isinstance(value, str)
+                and "flipkart.com" in value
+            ):
+                urls.append(value)
+
+        # Nested results
+        for field in [
+            "results",
+            "items",
+            "products",
+            "data",
+        ]:
+            nested = data.get(field)
+
+            if nested:
+                urls.extend(
+                    _extract_product_urls(
+                        nested
+                    )
+                )
+
+    elif isinstance(data, list):
+
+        for item in data:
+            urls.extend(
+                _extract_product_urls(item)
+            )
+
+    # De-duplicate while preserving order
+    unique_urls = []
+
+    for url in urls:
+
+        if not isinstance(url, str):
+            continue
+
+        if "flipkart.com" not in url:
+            continue
+
+        if url not in unique_urls:
+            unique_urls.append(url)
+
+    return unique_urls
+
+
+def _candidate_matches_isbn(
+    product_url: str,
+    isbn_13: str | None,
+    isbn_10: str | None,
+) -> bool:
+    """
+    Quick URL-level ISBN check.
+    """
+
+    if not isbn_13 and not isbn_10:
+        return True
+
+    if isbn_13 and isbn_13 in product_url:
+        return True
+
+    if isbn_10 and isbn_10 in product_url:
+        return True
+
+    return False
+
+
+def search_flipkart(
+    title: str | None = None,
+    author: str | None = None,
+    isbn_13: str | None = None,
+    isbn_10: str | None = None,
+) -> dict:
+    """
+    Discover a Flipkart product using title + author (Flipkart search does not index ISBNs reliably).
+    """
+
+    if title:
+        clean_title = re.sub(r"[^\w\s]", " ", title).strip()
+        query_term = f"{clean_title} {author or ''}".strip()
+    else:
+        query_term = isbn_13 or isbn_10
+
+    if not query_term:
+        return {
+            "source": "flipkart",
+            "status": "error",
+            "message": (
+                "Title or ISBN is required for "
+                "Flipkart search."
+            ),
+            "results": [],
+        }
+
+    # ----------------------------------------
+    # Search URL (Category sid=bks for Books)
+    # ----------------------------------------
+
+    search_url = (
+        "https://www.flipkart.com/search"
+        f"?q={quote_plus(query_term)}&sid=bks"
+    )
+
+    try:
+
+        result = trigger_search_collector(
+            search_url
+        )
+
+        collection_id = result.get(
+            "collection_id"
+        )
+
+        if not collection_id:
+            return {
+                "source": "flipkart",
+                "status": "error",
+                "message": (
+                    "Flipkart search collector "
+                    "did not return a collection_id."
+                ),
+                "results": [],
+            }
+
+        data = wait_for_collection(
+            collection_id
+        )
+
+    except Exception as exc:
+
+        return {
+            "source": "flipkart",
+            "status": "error",
+            "message": (
+                "Flipkart search collector failed: "
+                f"{exc}"
+            ),
+            "results": [],
+        }
+
+    # ----------------------------------------
+    # Extract candidate product URLs
+    # ----------------------------------------
+
+    product_urls = _extract_product_urls(
+        data
+    )
+
+    if not product_urls:
+        return {
+            "source": "flipkart",
+            "status": "not_found",
+            "message": (
+                "Flipkart search returned "
+                "no product URLs."
+            ),
+            "results": [],
+        }
+
+    # ----------------------------------------
+    # Prefer candidates whose URL contains the ISBN
+    # ----------------------------------------
+
+    matching_urls = [
+        url
+        for url in product_urls
+        if _candidate_matches_isbn(
+            url,
+            isbn_13,
+            isbn_10,
+        )
+    ]
+
+    if matching_urls:
+
+        product_url = matching_urls[0]
+
+        return {
+            "source": "flipkart",
+            "status": "success",
+            "product_url": product_url,
+            "results": [
+                {
+                    "product_url": product_url
+                }
+            ],
+        }
+
+    return {
+        "source": "flipkart",
+        "status": "success",
+        "product_url": product_urls[0],
+        "candidates": product_urls[:10],
+        "results": [
+            {
+                "product_url": product_urls[0]
+            }
+        ],
+    }

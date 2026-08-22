@@ -3,7 +3,8 @@ import re
 
 def normalize_text(value: str | None) -> str | None:
     """
-    Normalize text for comparison without changing the original data.
+    Normalize text for comparison without changing
+    the original scraped data.
     """
 
     if not value:
@@ -11,22 +12,81 @@ def normalize_text(value: str | None) -> str | None:
 
     value = value.strip().lower()
 
+    # Replace punctuation with spaces
     value = re.sub(r"[^\w\s]", " ", value)
 
+    # Collapse repeated whitespace
     value = re.sub(r"\s+", " ", value)
 
     return value.strip()
+
+
+def clean_display_title(value: str | None) -> str | None:
+    """
+    Clean up scraped raw titles for elegant display.
+
+    Strips marketplace fluff, repeated parentheticals,
+    and converts ALL-CAPS to Title Case.
+
+    Examples:
+        "Goodbye, Eri: (Goodbye, Eri)" -> "Goodbye, Eri"
+        "Goodbye, Eri: Buy Goodbye, Eri by Fujimoto... | Flipkart.com" -> "Goodbye, Eri"
+        "GOODBYE, ERI" -> "Goodbye, Eri"
+    """
+    if not value:
+        return None
+
+    # Remove Flipkart/Amazon trailing junk
+    value = re.sub(r':\s*Buy\s+.*$', '', value, flags=re.IGNORECASE)
+    value = re.sub(r'\|.*$', '', value).strip()
+
+    # Remove repeated parenthetical title: e.g. 'Goodbye, Eri: (Goodbye, Eri)' -> 'Goodbye, Eri'
+    m = re.match(r'^(.*?):\s*\(\1\)$', value, flags=re.IGNORECASE)
+    if m:
+        value = m.group(1).strip()
+
+    # Remove exact parenthesis duplication: e.g. 'Title (Title)' -> 'Title'
+    m2 = re.match(r'^(.*?)\s*\(\1\)$', value, flags=re.IGNORECASE)
+    if m2:
+        value = m2.group(1).strip()
+
+    # Strip unwanted quotes or trailing whitespace
+    value = value.strip(' "\'').strip()
+
+    # Convert ALL-CAPS to Title Case
+    if value.isupper() and len(value) > 3:
+        value = value.title()
+
+    return value
 
 
 def normalize_title(value: str | None) -> str | None:
     """
     Normalize a book title for comparison.
 
-    Also removes an immediately repeated title.
+    Removes immediately repeated title text and punctuation.
 
     Example:
         "Goodbye, Eri: (Goodbye, Eri)"
-        → "goodbye eri"
+        -> "goodbye eri"
+    """
+
+    cleaned = clean_display_title(value)
+    return normalize_text(cleaned)
+
+
+def normalize_author(value: str | None) -> str | None:
+    """
+    Normalize an author name for comparison.
+
+    Handles marketplaces that reverse first/last name order.
+
+    Example:
+        "Tatsuki Fujimoto"
+        -> "fujimoto tatsuki"
+
+        "Fujimoto Tatsuki"
+        -> "fujimoto tatsuki"
     """
 
     value = normalize_text(value)
@@ -36,59 +96,140 @@ def normalize_title(value: str | None) -> str | None:
 
     words = value.split()
 
+    # Sort name components so different name orders
+    # compare equally.
+    words.sort()
 
-    if len(words) % 2 == 0:
-        midpoint = len(words) // 2
-
-        first_half = words[:midpoint]
-        second_half = words[midpoint:]
-
-        if first_half == second_half:
-            value = " ".join(first_half)
-
-    return value
+    return " ".join(words)
 
 
 def normalize_isbn(value: str | None) -> str | None:
     """
-    Normalize ISBN-10 or ISBN-13 by removing formatting characters.
+    Normalize ISBN-10 or ISBN-13 by removing
+    formatting characters.
     """
 
     if not value:
         return None
 
-    return re.sub(r"[^0-9Xx]", "", value).upper()
+    return re.sub(
+        r"[^0-9Xx]",
+        "",
+        value,
+    ).upper()
+
+
+def isbn13_to_isbn10(value: str | None) -> str | None:
+    """
+    Convert a valid ISBN-13 beginning with 978
+    into ISBN-10.
+
+    Example:
+        9781974738939
+        -> 1974738930
+    """
+
+    isbn13 = normalize_isbn(value)
+
+    if not isbn13:
+        return None
+
+    if len(isbn13) != 13:
+        return None
+
+    # ISBN-10 conversion is only possible for
+    # ISBN-13 values beginning with 978.
+    if not isbn13.startswith("978"):
+        return None
+
+    core = isbn13[3:12]
+
+    try:
+        digits = [
+            int(digit)
+            for digit in core
+        ]
+    except ValueError:
+        return None
+
+    total = 0
+    weights = [10, 9, 8, 7, 6, 5, 4, 3, 2]
+
+    for weight, digit in zip(weights, digits):
+        total += weight * digit
+
+    check_value = (11 - (total % 11)) % 11
+
+    if check_value == 10:
+        check_digit = "X"
+    else:
+        check_digit = str(check_value)
+
+    return core + check_digit
 
 
 def normalize_listing(data: dict) -> dict:
     """
     Create a normalized copy of a marketplace listing.
 
-    Original scraped data is not modified.
+    Original scraped data for display is preserved, while
+    normalized comparison keys are generated for comparison.
     """
 
     normalized = data.copy()
 
+    # -------------------------
+    # Display vs Comparison fields
+    # -------------------------
+    raw_title = data.get("book_title")
+    cleaned_title = clean_display_title(raw_title)
+    normalized["book_title"] = cleaned_title or raw_title
+    normalized["author"] = data.get("author")
 
-    normalized["book_title"] = normalize_title(
-        data.get("book_title")
+    normalized["normalized_book_title"] = normalize_title(
+        cleaned_title or raw_title
     )
 
+    normalized["normalized_author"] = normalize_author(
+        data.get("author")
+    )
+
+    # -------------------------
+    # Other text fields
+    # -------------------------
+
     for field in [
-        "author",
         "publisher",
         "edition",
         "availability",
         "seller_name",
     ]:
-        normalized[field] = normalize_text(data.get(field))
+        normalized[field] = data.get(field)
+        normalized[f"normalized_{field}"] = normalize_text(
+            data.get(field)
+        )
+
+    # -------------------------
+    # ISBN-13
+    # -------------------------
+
+    normalized["isbn_13"] = normalize_isbn(
+        data.get("isbn_13")
+    )
+
+    # -------------------------
+    # ISBN-10
+    # -------------------------
 
     normalized["isbn_10"] = normalize_isbn(
         data.get("isbn_10")
     )
 
-    normalized["isbn_13"] = normalize_isbn(
-        data.get("isbn_13")
-    )
+    # If ISBN-10 wasn't supplied by the
+    # marketplace, derive it from ISBN-13.
+    if not normalized["isbn_10"]:
+        normalized["isbn_10"] = isbn13_to_isbn10(
+            normalized.get("isbn_13")
+        )
 
     return normalized
