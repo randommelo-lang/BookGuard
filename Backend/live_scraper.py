@@ -1,7 +1,13 @@
 import re
 import urllib.parse
 import httpx
-from normalization import normalize_isbn, isbn13_to_isbn10
+from normalization import (
+    normalize_isbn,
+    isbn13_to_isbn10,
+    isbn10_to_isbn13,
+    validate_isbn10,
+    clean_display_title,
+)
 
 HEADERS = {
     "User-Agent": (
@@ -25,14 +31,24 @@ def extract_isbn(text_or_url: str) -> tuple[str | None, str | None]:
     if not text_or_url:
         return None, None
 
-    isbn13_m = re.search(r"(978\d{10}|979\d{10})", text_or_url)
+    # Filter out query string parameters (e.g. qid=1787399784) when parsing URLs
+    target_text = text_or_url
+    if text_or_url.startswith("http"):
+        parsed = urllib.parse.urlparse(text_or_url)
+        target_text = parsed.path or text_or_url
+
+    isbn13_m = re.search(r"(978\d{10}|979\d{10})", target_text)
     isbn_13 = isbn13_m.group(1) if isbn13_m else None
 
-    if isbn_13:
+    isbn10_m = re.search(r"(?:/dp/|/gp/product/|pid=|isbn=|\b)([0-9X]{10})\b", target_text, re.IGNORECASE)
+    candidate_10 = isbn10_m.group(1).upper() if isbn10_m else None
+
+    isbn_10 = candidate_10 if (candidate_10 and validate_isbn10(candidate_10)) else None
+
+    if isbn_13 and not isbn_10:
         isbn_10 = isbn13_to_isbn10(isbn_13)
-    else:
-        isbn10_m = re.search(r"(?:/dp/|/gp/product/|pid=|isbn=|\b)([0-9X]{10})\b", text_or_url, re.IGNORECASE)
-        isbn_10 = isbn10_m.group(1).upper() if isbn10_m else None
+    elif isbn_10 and not isbn_13:
+        isbn_13 = isbn10_to_isbn13(isbn_10)
 
     return isbn_13, isbn_10
 
@@ -225,67 +241,72 @@ def scrape_live_bookswagon(url_or_query: str, title: str | None = None, author: 
     isbn_13, isbn_10 = extract_isbn(url_or_query)
     target_isbn = isbn_13 or isbn_10
 
+    urls_to_try = []
     if url_or_query.startswith("http"):
-        target_url = url_or_query
-    elif title and target_isbn:
-        clean_t = re.sub(r"[^\w\s-]", "", title.lower()).strip()
-        slug = re.sub(r"\s+", "-", clean_t) or "book"
-        target_url = f"https://www.bookswagon.com/book/{slug}/{target_isbn}"
-    elif target_isbn:
-        target_url = f"https://www.bookswagon.com/book/book/{target_isbn}"
+        urls_to_try.append(url_or_query)
+
+    if target_isbn:
+        urls_to_try.append(f"https://www.bookswagon.com/book/book/{target_isbn}")
+        if title:
+            clean_t = re.sub(r"[^\w\s-]", "", clean_display_title(title).lower()).strip()
+            slug = re.sub(r"\s+", "-", clean_t) or "book"
+            urls_to_try.append(f"https://www.bookswagon.com/book/{slug}/{target_isbn}")
     elif title:
-        target_url = f"https://www.bookswagon.com/search/{urllib.parse.quote_plus(title)}"
-    else:
+        urls_to_try.append(f"https://www.bookswagon.com/search/{urllib.parse.quote_plus(clean_display_title(title))}")
+
+    if not urls_to_try:
         return None
 
-    try:
-        with httpx.Client(timeout=10, follow_redirects=True, headers=HEADERS) as client:
-            res = client.get(target_url)
-            if res.status_code != 200:
-                return None
+    for target_url in urls_to_try:
+        try:
+            with httpx.Client(timeout=10, follow_redirects=True, headers=HEADERS) as client:
+                res = client.get(target_url)
+                if res.status_code != 200:
+                    continue
 
-            if "filenotfound" in str(res.url).lower() or "/errors/" in str(res.url).lower():
-                return None
+                if "filenotfound" in str(res.url).lower() or "/errors/" in str(res.url).lower():
+                    continue
 
-            html = res.text
+                html = res.text
 
-            # Title
-            title_m = re.search(r'id="ctl00_phBody_ProductDetail_lblTitle"[^>]*>\s*(.*?)\s*</span>', html)
-            extracted_title = title_m.group(1).strip() if title_m else (title or "Book Title")
+                # Title
+                title_m = re.search(r'id="ctl00_phBody_ProductDetail_lblTitle"[^>]*>\s*(.*?)\s*</span>', html)
+                extracted_title = title_m.group(1).strip() if title_m else (title or "Book Title")
 
-            # Author
-            author_m = re.search(r'id="ctl00_phBody_ProductDetail_lblAuthor"[^>]*>.*?<a[^>]*>\s*(.*?)\s*</a>', html, re.DOTALL)
-            extracted_author = author_m.group(1).strip() if author_m else (author or "Author")
+                # Author
+                author_m = re.search(r'id="ctl00_phBody_ProductDetail_lblAuthor"[^>]*>.*?<a[^>]*>\s*(.*?)\s*</a>', html, re.DOTALL)
+                extracted_author = author_m.group(1).strip() if author_m else (author or "Author")
 
-            # Price
-            price_val = None
-            price_m = (
-                re.search(r'id="ctl00_phBody_ProductDetail_lblourPrice"[^>]*>\s*₹?\s*Rs\.\s*([\d,]+)', html)
-                or re.search(r'id="ctl00_phBody_ProductDetail_lblourPrice"[^>]*>\s*₹?\s*([\d,]+)', html)
-                or re.search(r'"price":\s*"([\d.]+)"', html)
-            )
-            if price_m:
-                try:
-                    price_val = float(price_m.group(1).replace(",", ""))
-                except ValueError:
-                    pass
+                # Price
+                price_val = None
+                price_m = (
+                    re.search(r'id="ctl00_phBody_ProductDetail_lblourPrice"[^>]*>\s*₹?\s*Rs\.\s*([\d,]+)', html)
+                    or re.search(r'id="ctl00_phBody_ProductDetail_lblourPrice"[^>]*>\s*₹?\s*([\d,]+)', html)
+                    or re.search(r'"price":\s*"([\d.]+)"', html)
+                )
+                if price_m:
+                    try:
+                        price_val = float(price_m.group(1).replace(",", ""))
+                    except ValueError:
+                        pass
 
-            if not price_val or price_val < 50:
-                price_val = 1770.0
+                if not price_val or price_val < 50:
+                    price_val = 1770.0
 
-            return {
-                "book_title": extracted_title,
-                "author": extracted_author,
-                "isbn_10": isbn_10 or "197475619X",
-                "isbn_13": isbn_13 or "9781974756193",
-                "publisher": "VIZ Media LLC",
-                "edition": "Hardcover",
-                "price": {"value": float(price_val), "currency": "INR", "symbol": "₹"},
-                "availability": "In Stock",
-                "seller_name": "Bookswagon Express",
-                "product_url": str(res.url) if str(res.url).startswith("http") else target_url,
-                "store": "Bookswagon",
-            }
-    except Exception:
-        pass
+                return {
+                    "book_title": extracted_title,
+                    "author": extracted_author,
+                    "isbn_10": isbn_10 or "197475619X",
+                    "isbn_13": isbn_13 or "9781974756193",
+                    "publisher": "VIZ Media LLC",
+                    "edition": "Hardcover",
+                    "price": {"value": float(price_val), "currency": "INR", "symbol": "₹"},
+                    "availability": "In Stock",
+                    "seller_name": "Bookswagon Express",
+                    "product_url": str(res.url) if str(res.url).startswith("http") else target_url,
+                    "store": "Bookswagon",
+                }
+        except Exception:
+            pass
+
     return None

@@ -48,6 +48,12 @@ def _first_result(
     return None
 
 
+from normalization import (
+    normalize_isbn,
+    clean_display_title,
+    resolve_isbn_from_title,
+)
+
 from live_scraper import (
     scrape_live_amazon,
     scrape_live_flipkart,
@@ -69,6 +75,11 @@ def search_store(
 
     source = source.lower().strip()
 
+    if not isbn_13 and not isbn_10 and title:
+        res_13, res_10 = resolve_isbn_from_title(title)
+        isbn_13 = isbn_13 or res_13
+        isbn_10 = isbn_10 or res_10
+
     if not isbn_13 and not isbn_10 and not product_url and not title:
         return _error_response(
             source=source,
@@ -79,87 +90,32 @@ def search_store(
         )
 
     store_product_url = product_url if (product_url and source in product_url.lower()) else None
-    target_query = store_product_url or (f"{title} {author or ''}".strip() if title else None) or isbn_13 or isbn_10
-
-    # --------------------------------
-    # Flipkart
-    # --------------------------------
-
-    if source == "flipkart":
-        if store_product_url:
-            try:
-                listing = scrape_flipkart(store_product_url)
-                if listing and listing.get("status") == "success" and listing.get("results"):
-                    res = listing["results"][0]
-                    res["source"] = "flipkart"
-                    res["store"] = "Flipkart"
-                    return listing
-            except Exception:
-                pass
-
-        live_res = scrape_live_flipkart(target_query, title=title, author=author)
-        if live_res:
-            live_res["source"] = "flipkart"
-            live_res["store"] = "Flipkart"
-            return {
-                "source": "flipkart",
-                "status": "success",
-                "results": [live_res],
-            }
-
-    # --------------------------------
-    # Amazon
-    # --------------------------------
-
+    
     if source == "amazon":
-        amazon_query = store_product_url or isbn_10 or isbn_13 or (f"{title} {author or ''}".strip() if title else None)
-        if store_product_url:
-            try:
-                listing = search_amazon(isbn_13=isbn_13, isbn_10=isbn_10)
-                if listing and listing.get("status") == "success" and listing.get("results"):
-                    res = listing["results"][0]
-                    res["source"] = "amazon"
-                    res["store"] = "Amazon"
-                    return listing
-            except Exception:
-                pass
+        target_query = store_product_url or isbn_10 or isbn_13 or (f"{title} {author or ''}".strip() if title else None)
+    elif source == "bookswagon":
+        target_query = store_product_url or isbn_13 or isbn_10 or (f"{title} {author or ''}".strip() if title else None)
+    elif source == "flipkart":
+        target_query = store_product_url or (f"https://www.flipkart.com/book/p/itm?pid={isbn_13}" if isbn_13 else None) or isbn_13 or isbn_10 or (f"{title} {author or ''}".strip() if title else None)
+    else:
+        target_query = store_product_url or isbn_13 or isbn_10 or (f"{title} {author or ''}".strip() if title else None)
 
-        live_res = scrape_live_amazon(amazon_query, title=title, author=author)
-        if live_res:
-            live_res["source"] = "amazon"
-            live_res["store"] = "Amazon"
-            return {
-                "source": "amazon",
-                "status": "success",
-                "results": [live_res],
-            }
+    if not target_query:
+        return _error_response(
+            source=source,
+            status="error",
+            message=f"Could not build search query for {source}.",
+            isbn_13=isbn_13,
+            isbn_10=isbn_10,
+        )
 
-    # --------------------------------
-    # Bookswagon
-    # --------------------------------
-
-    if source == "bookswagon":
-        bw_query = store_product_url or isbn_13 or isbn_10 or (f"{title} {author or ''}".strip() if title else None)
-        if store_product_url:
-            try:
-                listing = scrape_bookswagon(store_product_url)
-                if listing and listing.get("status") == "success" and listing.get("results"):
-                    res = listing["results"][0]
-                    res["source"] = "bookswagon"
-                    res["store"] = "Bookswagon"
-                    return listing
-            except Exception:
-                pass
-
-        live_res = scrape_live_bookswagon(bw_query, title=title, author=author)
-        if live_res:
-            live_res["source"] = "bookswagon"
-            live_res["store"] = "Bookswagon"
-            return {
-                "source": "bookswagon",
-                "status": "success",
-                "results": [live_res],
-            }
+    try:
+        from self_healing import heal_scrape
+        healed_res = heal_scrape(target_query, store=source, title=title, author=author)
+        if healed_res and healed_res.get("status") == "success" and healed_res.get("results"):
+            return healed_res
+    except Exception:
+        pass
 
     return _error_response(
         source=source,

@@ -72,9 +72,41 @@ def test_analyzer():
     assert analysis_low["risk_level"] == "high", f"Expected high risk for ₹99 listing, got {analysis_low['risk_level']}"
     print("✓ Low Price High Risk Detection Test Passed!")
 
+def test_self_healing():
+    from self_healing import SelfHealingScraper
+    from live_scraper import extract_isbn
+    healer = SelfHealingScraper()
+
+    # Test URL query param filtering (e.g. qid=1787399784 must NOT be mistaken for an ISBN)
+    asin_url = "https://www.amazon.in/Goodbye-Eri-New-Pages1-Team/dp/B0FGXH7RWV?qid=1787399784"
+    isbn13_found, isbn10_found = extract_isbn(asin_url)
+    assert isbn13_found is None, f"Expected None for isbn_13 on ASIN URL, got {isbn13_found}"
+    assert isbn10_found is None, f"Expected None for isbn_10 on ASIN URL, got {isbn10_found}"
+    print("✓ URL Query Parameter (qid) Filtering Test Passed!")
+
+    # Test failure classification
+    assert healer.classify_failure(None) == "Empty or Null Scraper Response"
+    assert healer.classify_failure({}, html_content="<html>reCAPTCHA</html>") == "Anti-Bot Captcha / reCAPTCHA Block Detected"
+
+    # Test schema repair (derive ISBN-10 from ISBN-13 & clean title fluff)
+    raw_unhealed = {
+        "book_title": "Goodbye, Eri: (Goodbye, Eri)",
+        "isbn_13": "9781974738939",
+        "price": 888.0,
+        "store": "Bookswagon"
+    }
+
+    healed_dict, repaired = healer.heal_schema(raw_unhealed)
+    assert healed_dict["book_title"] == "Goodbye, Eri"
+    assert healed_dict["isbn_10"] == "1974738930"
+    assert healed_dict["price"]["value"] == 888.0
+    assert "isbn_10 (derived via ISBN-13 checksum)" in repaired
+    print("✓ Self-Healing Engine Unit Test Passed!")
+
 if __name__ == "__main__":
     test_isbn10_conversion()
     test_source_detection()
     test_normalization_and_validation()
     test_analyzer()
+    test_self_healing()
     print("\nALL BACKEND UNIT TESTS PASSED SUCCESSFULLY!")

@@ -50,24 +50,30 @@ def health():
 
 def scrape_source(url: str) -> tuple[str, dict]:
     """
-    Detect and scrape a marketplace URL.
+    Detect and scrape a marketplace URL using Bright Data Self-Healing Engine.
     """
 
     source = detect_source(url)
 
     try:
+        from self_healing import heal_scrape
+        data = heal_scrape(url_or_query=url, store=source)
+        if data and data.get("status") == "success" and data.get("results"):
+            return source, data
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    try:
         if source == "bookswagon":
             data = scrape_bookswagon(url)
-
         elif source == "amazon":
             data = scrape_amazon(url)
-
         elif source == "flipkart":
             data = scrape_flipkart(url)
-
         elif source == "other":
             data = scrape_generic(url)
-
         else:
             raise HTTPException(
                 status_code=400,
@@ -285,6 +291,7 @@ def analyze(request: AnalyzeRequest):
         "analysis": analysis,
         "comparison": comparison,
         "comparison_errors": comparison_errors,
+        "healing_meta": data.get("healing_meta") or listing.get("healing_meta"),
     }
 
 
