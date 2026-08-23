@@ -20,7 +20,7 @@ app = FastAPI(title="BookGuard API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -379,10 +379,17 @@ def auto_compare(request: AutoCompareRequest):
     )
 
     discovered_listings = []
+    if primary_listing:
+        discovered_listings.append(primary_listing)
+
     for store_name, store_res in discovery.get("results", {}).items():
         results = store_res.get("results", [])
         if results and isinstance(results[0], dict):
-            discovered_listings.append(normalize_listing(results[0]))
+            disc_listing = normalize_listing(results[0])
+            # Avoid duplicate entries if primary_listing already covers this store
+            disc_store = disc_listing.get("store") or disc_listing.get("source") or ""
+            if not any((d.get("store") or d.get("source") or "").lower() == disc_store.lower() for d in discovered_listings):
+                discovered_listings.append(disc_listing)
 
     comparison = None
     if discovered_listings:

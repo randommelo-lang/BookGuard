@@ -301,9 +301,12 @@ def normalize_listing(data: dict) -> dict:
 
     # If ISBN-10 wasn't supplied by the
     # marketplace, derive it from ISBN-13.
-    if not normalized["isbn_10"]:
-        normalized["isbn_10"] = isbn13_to_isbn10(
-            normalized.get("isbn_13")
-        )
+    if not normalized.get("isbn_10") and normalized.get("isbn_13"):
+        normalized["isbn_10"] = isbn13_to_isbn10(normalized.get("isbn_13"))
+
+    # If ISBN-13 wasn't supplied by the
+    # marketplace, derive it from ISBN-10.
+    if not normalized.get("isbn_13") and normalized.get("isbn_10"):
+        normalized["isbn_13"] = isbn10_to_isbn13(normalized.get("isbn_10"))
 
     return normalized

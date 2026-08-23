@@ -31,16 +31,13 @@ def extract_isbn(text_or_url: str) -> tuple[str | None, str | None]:
     if not text_or_url:
         return None, None
 
-    # Filter out query string parameters (e.g. qid=1787399784) when parsing URLs
-    target_text = text_or_url
-    if text_or_url.startswith("http"):
-        parsed = urllib.parse.urlparse(text_or_url)
-        target_text = parsed.path or text_or_url
-
-    isbn13_m = re.search(r"(978\d{10}|979\d{10})", target_text)
+    # Search entire string/URL for ISBN-13
+    isbn13_m = re.search(r"(978\d{10}|979\d{10})", text_or_url)
     isbn_13 = isbn13_m.group(1) if isbn13_m else None
 
-    isbn10_m = re.search(r"(?:/dp/|/gp/product/|pid=|isbn=|\b)([0-9X]{10})\b", target_text, re.IGNORECASE)
+    # Remove tracking query parameters like qid= before searching for ISBN-10
+    clean_text = re.sub(r"[?&]qid=\d+", "", text_or_url)
+    isbn10_m = re.search(r"(?:/dp/|/gp/product/|pid=|isbn=|\b)([0-9X]{10})\b", clean_text, re.IGNORECASE)
     candidate_10 = isbn10_m.group(1).upper() if isbn10_m else None
 
     isbn_10 = candidate_10 if (candidate_10 and validate_isbn10(candidate_10)) else None
@@ -142,93 +139,116 @@ def scrape_live_flipkart(url_or_query: str, title: str | None = None, author: st
     """
     isbn_13, isbn_10 = extract_isbn(url_or_query)
 
+    candidate_urls = []
     if url_or_query.startswith("http"):
-        target_url = url_or_query
-    elif title:
-        q_str = f"{title} {author or ''}".strip()
-        target_url = f"https://www.flipkart.com/search?q={urllib.parse.quote_plus(q_str)}&sid=bks"
-    elif isbn_13:
-        target_url = f"https://www.flipkart.com/search?q={isbn_13}&sid=bks"
-    else:
+        candidate_urls.append(url_or_query)
+    
+    if isbn_13:
+        candidate_urls.append(f"https://www.flipkart.com/book/p/itm?pid={isbn_13}")
+        candidate_urls.append(f"https://www.flipkart.com/search?q={isbn_13}&sid=bks")
+    if isbn_10:
+        candidate_urls.append(f"https://www.flipkart.com/search?q={isbn_10}&sid=bks")
+    if title:
+        candidate_urls.append(f"https://www.flipkart.com/search?q={urllib.parse.quote_plus(title)}&sid=bks")
+
+    if not candidate_urls:
         return None
 
     try:
         with httpx.Client(timeout=10, follow_redirects=True, headers=HEADERS) as client:
-            res = client.get(target_url)
-            if res.status_code != 200:
-                return None
-
-            html = res.text
-
-            extracted_title = title or "Book Title"
-            extracted_author = author or "Author"
-
-            title_m = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE)
-            if title_m:
-                raw_t = title_m.group(1)
-                if ":" in raw_t:
-                    extracted_title = raw_t.split(":", 1)[0].strip()
-
-            desc_m = re.search(r'<meta name="description" content="(.*?)"', html, re.IGNORECASE)
-            if desc_m:
-                raw_d = desc_m.group(1)
-                if " by " in raw_d:
-                    auth_part = raw_d.split(" by ", 1)[1]
-                    for end in [" at ", " from ", " online"]:
-                        if end in auth_part:
-                            auth_part = auth_part.split(end, 1)[0]
-                    extracted_author = auth_part.strip() or extracted_author
-
-            # Exact Live Price extraction from Flipkart HTML tags
-            price_val = None
-
-            # Priority 1: Specific Flipkart price class names (_30jeq3, _16Jk6d, nxr7_H, _25bRAu)
-            price_m = (
-                re.search(r'<div[^>]*class="[^"]*(_30jeq3|_16Jk6d|nxr7_H|_25bRAu|yRaATh)[^"]*"[^>]*>\s*₹?\s*([\d,]+)', html)
-                or re.search(r'<span[^>]*class="[^"]*(_30jeq3|_16Jk6d|nxr7_H|_25bRAu|yRaATh)[^"]*"[^>]*>\s*₹?\s*([\d,]+)', html)
-            )
-            if price_m:
+            for target_url in candidate_urls:
                 try:
-                    price_val = float(price_m.group(2).replace(",", ""))
-                except ValueError:
-                    pass
+                    res = client.get(target_url)
+                    if res.status_code != 200:
+                        continue
 
-            # Priority 2: JSON price metadata
-            if not price_val:
-                json_p = re.search(r'"price":\s*"?([\d,]+)"?', html)
-                if json_p:
-                    try:
-                        price_val = float(json_p.group(1).replace(",", ""))
-                    except ValueError:
-                        pass
+                    html = res.text
 
-            # Priority 3: Extract prices from Rupee symbols in body (exclude sub-100 & massive numbers)
-            if not price_val:
-                rupee_prices = [
-                    float(p.replace(",", ""))
-                    for p in re.findall(r"₹\s*([\d,]+)", html)
-                    if 100 <= float(p.replace(",", "")) <= 20000
-                ]
-                if rupee_prices:
-                    # Pick the main product selling price (usually first or second)
-                    price_val = rupee_prices[0]
+                    # If target_url is a Flipkart search page, extract and follow the direct Product Page URL (/p/itm...)
+                    if "/search?" in target_url or "/search/" in target_url:
+                        prod_links = re.findall(r'href="(/[^"]*/p/itm[^\"]*)"', html)
+                        if prod_links:
+                            rel_link = prod_links[0].replace("&amp;", "&")
+                            target_url = "https://www.flipkart.com" + rel_link
+                            res_prod = client.get(target_url)
+                            if res_prod.status_code == 200:
+                                html = res_prod.text
 
-            if not price_val:
-                return None
+                    extracted_title = title or "Book Title"
+                    extracted_author = author or "Author"
 
-            return {
-                "book_title": extracted_title,
-                "author": extracted_author,
-                "isbn_10": isbn_10,
-                "isbn_13": isbn_13,
-                "publisher": "Publisher",
-                "edition": "Paperback / Hardcover",
-                "price": {"value": float(price_val), "currency": "INR", "symbol": "₹"},
-                "availability": "In Stock",
-                "seller_name": "Flipkart Seller",
-                "product_url": target_url,
-                "store": "Flipkart",
-            }
+                    title_m = re.search(r'<title[^>]*>(.*?)</title>', html, re.IGNORECASE)
+                    if title_m:
+                        raw_t = title_m.group(1)
+                        if ":" in raw_t:
+                            extracted_title = raw_t.split(":", 1)[0].strip()
+
+                    desc_m = re.search(r'<meta name="description" content="(.*?)"', html, re.IGNORECASE)
+                    if desc_m:
+                        raw_d = desc_m.group(1)
+                        if " by " in raw_d:
+                            auth_part = raw_d.split(" by ", 1)[1]
+                            for end in [" at ", " from ", " online"]:
+                                if end in auth_part:
+                                    auth_part = auth_part.split(end, 1)[0]
+                            extracted_author = auth_part.strip() or extracted_author
+
+                    # Exact Live Price extraction from Flipkart HTML tags
+                    price_val = None
+
+                    # Priority 1: Specific Flipkart price class names (_30jeq3, _16Jk6d, nxr7_H, _25bRAu)
+                    price_m = (
+                        re.search(r'<div[^>]*class="[^"]*(_30jeq3|_16Jk6d|nxr7_H|_25bRAu|yRaATh)[^"]*"[^>]*>\s*₹?\s*([\d,]+)', html)
+                        or re.search(r'<span[^>]*class="[^"]*(_30jeq3|_16Jk6d|nxr7_H|_25bRAu|yRaATh)[^"]*"[^>]*>\s*₹?\s*([\d,]+)', html)
+                    )
+                    if price_m:
+                        try:
+                            price_val = float(price_m.group(2).replace(",", ""))
+                        except ValueError:
+                            pass
+
+                    # Priority 2: JSON price metadata
+                    if not price_val:
+                        json_p = re.search(r'"price":\s*"?([\d,]+)"?', html)
+                        if json_p:
+                            try:
+                                price_val = float(json_p.group(1).replace(",", ""))
+                            except ValueError:
+                                pass
+
+                    # Priority 3: Extract prices from Rupee symbols in body (exclude sub-100 & massive numbers)
+                    if not price_val:
+                        rupee_prices = [
+                            float(p.replace(",", ""))
+                            for p in re.findall(r"₹\s*([\d,]+)", html)
+                            if 100 <= float(p.replace(",", "")) <= 20000
+                        ]
+                        if rupee_prices:
+                            # Pick the main product selling price (usually first or second)
+                            price_val = rupee_prices[0]
+
+                    if not price_val:
+                        continue
+
+                    final_product_url = target_url
+                    if ("/search?" in target_url or "/search/" in target_url) and (isbn_13 or isbn_10):
+                        final_product_url = f"https://www.flipkart.com/book/p/itm?pid={isbn_13 or isbn_10}"
+
+                    return {
+                        "book_title": extracted_title,
+                        "author": extracted_author,
+                        "isbn_10": isbn_10,
+                        "isbn_13": isbn_13,
+                        "publisher": "Publisher",
+                        "edition": "Paperback / Hardcover",
+                        "price": {"value": float(price_val), "currency": "INR", "symbol": "₹"},
+                        "availability": "In Stock",
+                        "seller_name": "Flipkart Seller",
+                        "product_url": final_product_url,
+                        "store": "Flipkart",
+                    }
+                except Exception:
+                    continue
     except Exception:
         pass
     return None

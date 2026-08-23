@@ -67,7 +67,7 @@ def analyze_book(
     # Listing signals
     # -------------------------
 
-    availability = data.get("availability", "")
+    availability = str(data.get("availability") or "")
 
     if "international edition" in availability.lower():
         signals.append({
@@ -157,11 +157,11 @@ def analyze_book(
             [],
         )
 
-        current_source = data.get("store") or data.get("source")
+        current_source = str(data.get("store") or data.get("source") or "")
 
         for anomaly in anomalies:
 
-            anomaly_source = anomaly.get("source")
+            anomaly_source = str(anomaly.get("source") or "")
 
             # Only apply the anomaly to the listing
             # that actually has the suspicious price.
