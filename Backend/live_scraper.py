@@ -89,8 +89,13 @@ def scrape_live_amazon(url_or_query: str, title: str | None = None, author: str 
             author_m = (
                 re.search(r'by\s*<a[^>]*class="a-link-normal[^>]*>\s*(.*?)\s*</a>', html, re.IGNORECASE)
                 or re.search(r'<span class="author[^"]*"[^>]*>.*?<a[^>]*>\s*(.*?)\s*</a>', html, re.DOTALL)
+                or re.search(r'<span class="author[^"]*"[^>]*>\s*(.*?)\s*</span>', html, re.IGNORECASE)
+                or re.search(r'"author"\s*:\s*\[?\s*\{\s*"name"\s*:\s*"(.*?)"', html, re.IGNORECASE)
             )
-            extracted_author = author_m.group(1).strip() if author_m else (author or "Author")
+            extracted_author = author_m.group(1).strip() if author_m else author
+            if not extracted_author or extracted_author.strip().lower() in {"author", "unknown author", "none", ""}:
+                from normalization import resolve_author_from_title
+                extracted_author = resolve_author_from_title(extracted_title) or "Author"
 
             # Exact Live Price extraction
             price_val = None
@@ -192,6 +197,10 @@ def scrape_live_flipkart(url_or_query: str, title: str | None = None, author: st
                                 if end in auth_part:
                                     auth_part = auth_part.split(end, 1)[0]
                             extracted_author = auth_part.strip() or extracted_author
+
+                    if not extracted_author or extracted_author.strip().lower() in {"author", "unknown author", "none", ""}:
+                        from normalization import resolve_author_from_title
+                        extracted_author = resolve_author_from_title(extracted_title) or "Author"
 
                     # Exact Live Price extraction from Flipkart HTML tags
                     price_val = None

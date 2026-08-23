@@ -177,6 +177,32 @@ TITLE_ISBN_MAP = {
     "naruto cookbook": ("9781974756193", "197475619X"),
 }
 
+TITLE_AUTHOR_MAP = {
+    "goodbye eri": "Tatsuki Fujimoto",
+    "goodbye, eri": "Tatsuki Fujimoto",
+    "clean code": "Robert C. Martin",
+    "c programming": "Brian W. Kernighan, Dennis M. Ritchie",
+    "naruto shippuden official cookbook": "Sanae",
+    "naruto cookbook": "Sanae",
+    "naruto": "Masashi Kishimoto",
+}
+
+
+def resolve_author_from_title(title: str | None) -> str | None:
+    """
+    Resolve canonical author for known books when scrapers return generic placeholder string 'Author'.
+    """
+    if not title:
+        return None
+
+    clean_t = (clean_display_title(title) or title).lower().strip()
+    norm_t = re.sub(r"[^\w\s]", "", clean_t)
+
+    for key, author_name in TITLE_AUTHOR_MAP.items():
+        if key in clean_t or key in norm_t or norm_t in key:
+            return author_name
+    return None
+
 
 def resolve_isbn_from_title(title: str | None) -> tuple[str | None, str | None]:
     """
@@ -258,14 +284,20 @@ def normalize_listing(data: dict) -> dict:
     raw_title = data.get("book_title")
     cleaned_title = clean_display_title(raw_title)
     normalized["book_title"] = cleaned_title or raw_title
-    normalized["author"] = data.get("author")
+    raw_author = data.get("author")
+    if not raw_author or str(raw_author).strip().lower() in {"author", "unknown author", "none", ""}:
+        resolved_a = resolve_author_from_title(cleaned_title or raw_title)
+        if resolved_a:
+            raw_author = resolved_a
+
+    normalized["author"] = raw_author
 
     normalized["normalized_book_title"] = normalize_title(
         cleaned_title or raw_title
     )
 
     normalized["normalized_author"] = normalize_author(
-        data.get("author")
+        raw_author
     )
 
     # -------------------------
